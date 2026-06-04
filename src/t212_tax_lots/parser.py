@@ -41,6 +41,10 @@ NUMERIC_COLUMNS: list[str] = [
     "currency_conversion_fee",
 ]
 
+BUY_ACTIONS = frozenset({"Market buy", "Limit buy"})
+SELL_ACTIONS = frozenset({"Market sell", "Limit sell"})
+TRADE_ACTIONS = BUY_ACTIONS | SELL_ACTIONS
+
 
 def find_csv_files(path: Path) -> list[Path]:
     """Return CSV files from a single file path or from a directory.
@@ -142,37 +146,14 @@ def read_transactions(path: Path) -> pl.DataFrame:
 
 def get_trade_transactions(df: pl.DataFrame) -> pl.DataFrame:
     """Return only buy and sell transactions."""
-    return df.filter(
-        pl.col("action").is_in(
-            [
-                "Market buy",
-                "Limit buy",
-                "Market sell",
-                "Limit sell",
-            ]
-        )
-    )
+    return df.filter(pl.col("action").is_in(TRADE_ACTIONS))
 
 
 def get_buy_transactions(df: pl.DataFrame) -> pl.DataFrame:
     """Return only buy transactions."""
-    return df.filter(
-        pl.col("action").is_in(
-            [
-                "Market buy",
-                "Limit buy",
-            ]
-        )
-    )
+    return df.filter(pl.col("action").is_in(BUY_ACTIONS))
 
 
 def get_sell_transactions(df: pl.DataFrame) -> pl.DataFrame:
     """Return only sell transactions."""
-    return df.filter(
-        pl.col("action").is_in(
-            [
-                "Market sell",
-                "Limit sell",
-            ]
-        )
-    )
+    return df.filter(pl.col("action").is_in(SELL_ACTIONS))

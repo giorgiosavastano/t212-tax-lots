@@ -15,12 +15,47 @@ from datetime import date, datetime
 import polars as pl
 from dateutil.relativedelta import relativedelta
 
-
-BUY_ACTIONS = {"Market buy", "Limit buy"}
-SELL_ACTIONS = {"Market sell", "Limit sell"}
-TRADE_ACTIONS = BUY_ACTIONS | SELL_ACTIONS
+from t212_tax_lots.parser import BUY_ACTIONS, SELL_ACTIONS, TRADE_ACTIONS
 
 FLOAT_TOLERANCE = 1e-9
+
+OPEN_LOTS_SCHEMA = {
+    "asset_key": pl.String,
+    "ticker": pl.String,
+    "name": pl.String,
+    "isin": pl.String,
+    "buy_time": pl.Datetime,
+    "buy_date": pl.Date,
+    "remaining_shares": pl.Float64,
+    "price_per_share": pl.Float64,
+    "price_currency": pl.String,
+    "source_file": pl.String,
+}
+
+POSITIONS_SCHEMA = {
+    "asset_key": pl.String,
+    "ticker": pl.String,
+    "name": pl.String,
+    "isin": pl.String,
+    "shares": pl.Float64,
+    "oldest_buy_date": pl.Date,
+    "newest_buy_date": pl.Date,
+    "open_lots": pl.UInt32,
+}
+
+ELIGIBILITY_SCHEMA = {
+    "asset_key": pl.String,
+    "ticker": pl.String,
+    "name": pl.String,
+    "isin": pl.String,
+    "as_of_date": pl.Date,
+    "six_month_cutoff": pl.Date,
+    "eligible_shares": pl.Float64,
+    "total_shares": pl.Float64,
+    "oldest_buy_date": pl.Date,
+    "newest_buy_date": pl.Date,
+    "not_yet_eligible_shares": pl.Float64,
+}
 
 
 @dataclass
@@ -168,20 +203,7 @@ def open_lots_frame(transactions: pl.DataFrame) -> pl.DataFrame:
     ]
 
     if not rows:
-        return pl.DataFrame(
-            schema={
-                "asset_key": pl.String,
-                "ticker": pl.String,
-                "name": pl.String,
-                "isin": pl.String,
-                "buy_time": pl.Datetime,
-                "buy_date": pl.Date,
-                "remaining_shares": pl.Float64,
-                "price_per_share": pl.Float64,
-                "price_currency": pl.String,
-                "source_file": pl.String,
-            }
-        )
+        return pl.DataFrame(schema=OPEN_LOTS_SCHEMA)
 
     return pl.DataFrame(rows)
 
@@ -191,7 +213,7 @@ def positions_frame(transactions: pl.DataFrame) -> pl.DataFrame:
     lots = open_lots_frame(transactions)
 
     if lots.is_empty():
-        return lots
+        return pl.DataFrame(schema=POSITIONS_SCHEMA)
 
     return (
         lots.group_by(["asset_key", "ticker", "name", "isin"])
@@ -217,7 +239,7 @@ def eligible_to_sell_frame(
     lots = open_lots_frame(transactions)
 
     if lots.is_empty():
-        return lots
+        return pl.DataFrame(schema=ELIGIBILITY_SCHEMA)
 
     return (
         lots.with_columns(
