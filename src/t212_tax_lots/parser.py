@@ -115,9 +115,7 @@ def read_single_csv(csv_path: Path) -> pl.DataFrame:
 
     # Add the source file name so that later we can trace where each transaction
     # came from. This is useful when combining annual Trading 212 exports.
-    df = df.with_columns(
-        pl.lit(csv_path.name).alias("source_file")
-    )
+    df = df.with_columns(pl.lit(csv_path.name).alias("source_file"))
 
     return df
 
@@ -134,10 +132,7 @@ def read_transactions(path: Path) -> pl.DataFrame:
     """
     csv_files = find_csv_files(path)
 
-    dataframes = [
-        read_single_csv(csv_file)
-        for csv_file in csv_files
-    ]
+    dataframes = [read_single_csv(csv_file) for csv_file in csv_files]
 
     return pl.concat(
         dataframes,

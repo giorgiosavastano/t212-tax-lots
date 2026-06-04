@@ -93,10 +93,8 @@ def build_open_lots(transactions: pl.DataFrame) -> list[Lot]:
     if missing_columns:
         raise ValueError(f"Missing required columns: {sorted(missing_columns)}")
 
-    trades = (
-        transactions
-        .filter(pl.col("action").is_in(list(TRADE_ACTIONS)))
-        .sort("time")
+    trades = transactions.filter(pl.col("action").is_in(list(TRADE_ACTIONS))).sort(
+        "time"
     )
 
     open_lots: list[Lot] = []
@@ -146,11 +144,7 @@ def build_open_lots(transactions: pl.DataFrame) -> list[Lot]:
                     f"by {shares_to_sell:.8f}"
                 )
 
-    return [
-        lot
-        for lot in open_lots
-        if lot.remaining_shares > FLOAT_TOLERANCE
-    ]
+    return [lot for lot in open_lots if lot.remaining_shares > FLOAT_TOLERANCE]
 
 
 def open_lots_frame(transactions: pl.DataFrame) -> pl.DataFrame:
@@ -200,8 +194,7 @@ def positions_frame(transactions: pl.DataFrame) -> pl.DataFrame:
         return lots
 
     return (
-        lots
-        .group_by(["asset_key", "ticker", "name", "isin"])
+        lots.group_by(["asset_key", "ticker", "name", "isin"])
         .agg(
             pl.col("remaining_shares").sum().alias("shares"),
             pl.col("buy_date").min().alias("oldest_buy_date"),
@@ -227,13 +220,14 @@ def eligible_to_sell_frame(
         return lots
 
     return (
-        lots
-        .with_columns(
+        lots.with_columns(
             pl.lit(as_of_date).alias("as_of_date"),
             pl.lit(cutoff_date).alias("six_month_cutoff"),
             (pl.col("buy_date") <= pl.lit(cutoff_date)).alias("older_than_6_months"),
         )
-        .group_by(["asset_key", "ticker", "name", "isin", "as_of_date", "six_month_cutoff"])
+        .group_by(
+            ["asset_key", "ticker", "name", "isin", "as_of_date", "six_month_cutoff"]
+        )
         .agg(
             pl.col("remaining_shares")
             .filter(pl.col("older_than_6_months"))
