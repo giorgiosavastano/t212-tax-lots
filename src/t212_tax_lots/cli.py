@@ -1,7 +1,7 @@
 """Command-line interface for analysing Trading 212 transaction exports."""
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import polars as pl
 import typer
@@ -17,6 +17,8 @@ from t212_tax_lots.parser import (
     read_transactions,
 )
 from t212_tax_lots.portfolio import (
+    disposal_matches_frame,
+    disposal_summary_frame,
     eligible_to_sell_frame,
     open_lots_frame,
     positions_frame,
@@ -58,6 +60,20 @@ def _format_float(value: float | None) -> str:
         return ""
 
     return f"{value:.8f}".rstrip("0").rstrip(".")
+
+
+def _format_money(value: float | None) -> str:
+    """Format monetary values while keeping unknown amounts visible."""
+    if value is None:
+        return "unknown"
+    return f"{value:,.2f}"
+
+
+def _format_money_with_currency(value: float | None, currency: str | None) -> str:
+    """Format a known amount with its currency without labeling unknown values."""
+    if value is None:
+        return "unknown"
+    return f"{_format_money(value)} {currency or ''}".rstrip()
 
 
 def _filter_ticker(df: pl.DataFrame, ticker: str | None) -> pl.DataFrame:
@@ -295,3 +311,154 @@ def open_lots(
         )
 
     console.print(table)
+
+
+@app.command()
+def disposals(
+    input_path: InputPath,
+    threshold_months: int = typer.Option(
+        6,
+        "--threshold-months",
+        min=0,
+        help="Calendar-month holding threshold used to classify matched lots.",
+    ),
+    ticker: str | None = typer.Option(
+        None,
+        "--ticker",
+        "-t",
+        help="Only show disposals for this ticker.",
+    ),
+) -> None:
+    """Show realized FIFO disposal matches, holding periods, and totals."""
+    df = _read_input(input_path, report_unsupported=True)
+    try:
+        matches = _filter_ticker(
+            disposal_matches_frame(df, threshold_months=threshold_months), ticker
+        )
+        summary = disposal_summary_frame(matches)
+    except ValueError as error:
+        _calculation_error(error)
+
+    match_rows = list(matches.iter_rows(named=True))
+    rows_by_disposal: dict[str, list[dict[str, Any]]] = {}
+    for row in match_rows:
+        rows_by_disposal.setdefault(str(row["disposal_id"]), []).append(row)
+
+    disposals_table = Table(title="Share Disposals (FIFO)")
+    disposals_table.add_column("Disposal")
+    disposals_table.add_column("Ticker")
+    disposals_table.add_column("Name")
+    disposals_table.add_column("ISIN")
+    disposals_table.add_column("Sell date")
+    disposals_table.add_column("Quantity", justify="right")
+    disposals_table.add_column("Proceeds", justify="right")
+
+    for disposal_id, rows in rows_by_disposal.items():
+        first = rows[0]
+        proceeds = [row["sell_proceeds"] for row in rows]
+        total_proceeds = (
+            None
+            if any(value is None for value in proceeds)
+            else sum(float(value) for value in proceeds)
+        )
+        disposals_table.add_row(
+            disposal_id,
+            str(first["ticker"] or ""),
+            str(first["name"] or ""),
+            str(first["isin"] or ""),
+            str(first["sell_date"]),
+            _format_float(first["sold_shares"]),
+            _format_money_with_currency(total_proceeds, first["currency"]),
+        )
+
+    console.print(disposals_table)
+
+    matches_table = Table(title="Matched Acquisition Lots")
+    matches_table.add_column("Disposal")
+    matches_table.add_column("Ticker")
+    matches_table.add_column("Buy date")
+    matches_table.add_column("Matched", justify="right")
+    matches_table.add_column("Cost basis", justify="right")
+    matches_table.add_column("Gain/loss", justify="right")
+    matches_table.add_column("Holding")
+
+    for row in match_rows:
+        holding = (
+            "unknown"
+            if row["holding_days"] is None
+            else (
+                f"{row['holding_days']}d "
+                f"({'above' if row['above_threshold'] else 'below'} "
+                f"{threshold_months}m)"
+            )
+        )
+        matches_table.add_row(
+            str(row["disposal_id"]),
+            str(row["ticker"] or ""),
+            str(row["buy_date"] or ""),
+            _format_float(row["matched_shares"]),
+            _format_money_with_currency(row["cost_basis"], row["currency"]),
+            _format_money_with_currency(row["realized_gain_loss"], row["currency"]),
+            holding,
+        )
+
+    console.print(matches_table)
+
+    summary_table = Table(title="Disposal Summary")
+    summary_table.add_column("Scope")
+    summary_table.add_column("Ticker")
+    summary_table.add_column("Disposals", justify="right")
+    summary_table.add_column("Proceeds", justify="right")
+    summary_table.add_column("Cost basis", justify="right")
+    summary_table.add_column("Gain/loss", justify="right")
+    summary_table.add_column("Shortest")
+    summary_table.add_column("Longest")
+
+    for row in summary.iter_rows(named=True):
+        summary_table.add_row(
+            str(row["scope"]),
+            str(row["ticker"] or ""),
+            str(row["disposals"]),
+            _format_money_with_currency(row["total_proceeds"], row["currency"]),
+            _format_money_with_currency(row["total_cost_basis"], row["currency"]),
+            _format_money_with_currency(
+                row["total_realized_gain_loss"], row["currency"]
+            ),
+            (
+                "unknown"
+                if row["shortest_holding_days"] is None
+                else f"{row['shortest_holding_days']}d"
+            ),
+            (
+                "unknown"
+                if row["longest_holding_days"] is None
+                else f"{row['longest_holding_days']}d"
+            ),
+        )
+
+    console.print(summary_table)
+
+    warning_contexts: dict[str, set[str]] = {}
+    for row in match_rows:
+        if row["warning"]:
+            warning_contexts.setdefault(str(row["warning"]), set()).add(
+                str(row["disposal_id"])
+            )
+    for row in summary.iter_rows(named=True):
+        if row["warning"]:
+            warning_contexts.setdefault(str(row["warning"]), set()).add(
+                f"{row['scope']} {row['ticker'] or ''}".rstrip()
+            )
+
+    if warning_contexts:
+        warnings_table = Table(title="Disposal Warnings")
+        warnings_table.add_column("Context")
+        warnings_table.add_column("Warning")
+        for warning, contexts in warning_contexts.items():
+            context = (
+                ", ".join(sorted(contexts))
+                if len(contexts) <= 3
+                else f"{len(contexts)} disposals"
+            )
+            warnings_table.add_row(context, warning)
+        console.print(warnings_table)

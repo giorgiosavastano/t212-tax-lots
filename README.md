@@ -22,6 +22,8 @@ The tool currently:
 - Calculates open positions by matching recognized sells against buys using
   FIFO: the oldest available buy lot is consumed first.
 - Shows the remaining buy lots behind each position.
+- Reports recognized share disposals, their matched FIFO acquisition lots,
+  holding periods, realized gains/losses, and aggregate totals.
 - Reports shares bought on or before the date six calendar months before a
   chosen `as-of` date.
 - Uses ISIN to identify an asset when available, falling back to ticker.
@@ -165,6 +167,34 @@ uv run t212-tax-lots open-lots data/ --ticker AAPL
 The output includes each lot's buy date, remaining shares, original
 price-per-share information, and source file.
 
+### Review Share Disposals
+
+Review every recognized sell and the FIFO acquisition lots it consumed:
+
+```bash
+uv run t212-tax-lots disposals data/
+```
+
+Use a different calendar-month holding threshold or filter to one ticker:
+
+```bash
+uv run t212-tax-lots disposals data/ --threshold-months 12 --ticker AAPL
+```
+
+The detail table shows sell proceeds, matched buy dates and quantities, cost
+basis, realized gain/loss, holding days, and whether each matched lot is above
+or below the threshold. The summary table reports totals by ticker/currency and
+overall.
+
+The report prefers quantity multiplied by `Price / share` in the instrument's
+`Currency (Price / share)`. This keeps a buy and sell comparable when a Trading
+212 multi-currency account settles them in different cash currencies. It falls
+back to `Total` and `Currency (Total)` when price information is unavailable.
+Exported currency-conversion fees and stamp duty are included only when their
+currency matches the calculation currency. Missing values, unmatched sells,
+possible duplicate transactions, and incompatible currencies are reported as
+warnings; unknown values are not silently included in monetary totals.
+
 Use command-specific help for all options:
 
 ```bash
@@ -193,8 +223,10 @@ an ISIN is missing, ticker is used instead.
 
 - The tool assumes FIFO lot matching. This may not match the rules or elections
   relevant to your jurisdiction.
-- It does not calculate capital gains, losses, taxes, fees, or currency-adjusted
-  cost basis.
+- The disposal report calculates realized gains/losses from the monetary values
+  present in the export. It does not calculate taxes or convert amounts between
+  currencies. When it uses the instrument currency, gains/losses do not include
+  exchange-rate changes against another reporting currency.
 - It does not account for unrecognized trade action names, transfers, corporate
   actions, stock splits, mergers, or other events that may affect holdings.
 - Duplicate detection prefers Trading 212 transaction IDs. For rows without an

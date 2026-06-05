@@ -97,3 +97,62 @@ def test_positions_reports_invalid_export_cleanly(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert "Input error:" in result.stdout
     assert "missing required Trading 212 columns: Time" in result.stdout
+
+
+def test_disposals_reports_fifo_details_summary_and_unmatched_warning(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "export.csv"
+    path.write_text(
+        "\n".join(
+            [
+                "Action,Time,ID,ISIN,Ticker,Name,No. of shares,Total,Currency (Total)",
+                "Market buy,2025-01-01 09:00:00,B-1,ISIN-A,AAPL,Apple,1,10,EUR",
+                "Market sell,2025-08-01 09:00:00,S-1,ISIN-A,AAPL,Apple,2,30,EUR",
+            ]
+        )
+    )
+
+    result = runner.invoke(
+        app,
+        ["disposals", str(path), "--threshold-months", "6"],
+        terminal_width=160,
+    )
+    normalized_output = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Share Disposals (FIFO)" in normalized_output
+    assert "Disposal Summary" in normalized_output
+    assert "212d" in normalized_output
+    assert "above" in normalized_output
+    assert "6m" in normalized_output
+    assert "unmatched sell" in normalized_output
+    assert "unknown" in normalized_output
+    assert "unknown EUR" not in normalized_output
+
+
+def test_disposals_uses_instrument_currency_and_shows_ticker_for_matched_lots(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "multi-currency.csv"
+    path.write_text(
+        "\n".join(
+            [
+                "Action,Time,ID,ISIN,Ticker,Name,No. of shares,Price / share,"
+                "Currency (Price / share),Total,Currency (Total)",
+                "Market buy,2025-01-01 09:00:00,B-1,ISIN-A,AAPL,Apple,1,11,USD,10,EUR",
+                "Market sell,2025-08-01 09:00:00,S-1,ISIN-A,AAPL,Apple,1,12,USD,12,USD",
+            ]
+        )
+    )
+
+    result = runner.invoke(app, ["disposals", str(path)], terminal_width=160)
+    normalized_output = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Matched Acquisition Lots" in normalized_output
+    assert "Ticker" in normalized_output
+    assert "11.00 USD" in normalized_output
+    assert "1.00 USD" in normalized_output
+    assert "unknown USD" not in normalized_output
+    assert "buy and sell currencies differ" not in normalized_output
