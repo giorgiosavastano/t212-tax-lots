@@ -4,6 +4,7 @@ import polars as pl
 import pytest
 
 from t212_tax_lots.portfolio import (
+    MissingAcquisitionHistoryError,
     build_open_lots,
     eligible_to_sell_frame,
     open_lots_frame,
@@ -92,7 +93,10 @@ def test_build_open_lots_rejects_oversold_asset() -> None:
         ]
     )
 
-    with pytest.raises(ValueError, match="exceeds available shares"):
+    with pytest.raises(
+        MissingAcquisitionHistoryError,
+        match="missing from the supplied acquisition history.*Upload exports",
+    ):
         build_open_lots(transactions)
 
 
@@ -148,9 +152,7 @@ def test_eligible_to_sell_frame_splits_old_and_new_lots() -> None:
         ]
     )
 
-    row = eligible_to_sell_frame(transactions, as_of="2025-08-01").row(
-        0, named=True
-    )
+    row = eligible_to_sell_frame(transactions, as_of="2025-08-01").row(0, named=True)
 
     assert row["six_month_cutoff"].isoformat() == "2025-02-01"
     assert row["eligible_shares"] == 2.0

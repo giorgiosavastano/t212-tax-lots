@@ -25,8 +25,13 @@ The tool currently:
 - Reports shares bought on or before the date six calendar months before a
   chosen `as-of` date.
 - Uses ISIN to identify an asset when available, falling back to ticker.
-- Rejects a sell that exceeds the available recognized buy transactions for the
-  same asset.
+- Validates required columns, timestamps, trade quantities, and asset
+  identifiers before calculation.
+- Detects overlap duplicates using Trading 212 transaction IDs when available,
+  with a conservative cross-file fallback when IDs are absent.
+- Reports unsupported actions and excludes them from tax-lot calculations.
+- Rejects a sell that exceeds the available recognized buys with guidance to
+  upload the missing earlier acquisition history.
 
 Recognized trades are currently:
 
@@ -36,7 +41,8 @@ Recognized trades are currently:
 - `Limit sell`
 
 Other transaction types may appear in `inspect`, but they are not included in
-position or lot calculations.
+position or lot calculations. Position-related commands report their names and
+counts before continuing with recognized buys and sells.
 
 ## Setup
 
@@ -87,9 +93,11 @@ uv run t212-tax-lots inspect data/
 This displays:
 
 - The number of processed CSV files, rows, columns, and recognized trades.
+- The number of duplicate rows removed from overlapping exports.
 - Buy and sell transaction counts.
 - Row counts for each source file.
-- Counts for every transaction action in the exports.
+- Counts for every transaction action and whether tax-lot processing recognizes
+  it.
 
 This is useful for noticing unexpected transaction types or accidentally
 included files.
@@ -189,8 +197,12 @@ an ISIN is missing, ticker is used instead.
   cost basis.
 - It does not account for unrecognized trade action names, transfers, corporate
   actions, stock splits, mergers, or other events that may affect holdings.
-- It does not detect overlapping or duplicate exports. Supplying the same
-  transaction more than once will produce incorrect results.
+- Duplicate detection prefers Trading 212 transaction IDs. For rows without an
+  ID, exact matching transaction details are deduplicated only across different
+  files; review the import notice when combining exports.
+- Calculations require complete acquisition history for every recognized sell.
+  If an earlier buy is absent, upload exports covering purchases before the
+  reported sell timestamp.
 - It relies on the contents and column format of the supplied Trading 212
   exports.
 - Share quantities and prices currently use floating-point numbers.
@@ -203,9 +215,6 @@ Always inspect the inputs and validate important results independently.
 
 Potential improvements include:
 
-- Detecting duplicate transactions across overlapping exports.
-- Validating exports more thoroughly and reporting unsupported transaction
-  types.
 - Supporting transfers, stock splits, and additional Trading 212 trade actions.
 - Calculating realized gains and losses with fees and currency conversion.
 - Using decimal arithmetic where exact monetary precision is required.
@@ -216,9 +225,23 @@ These are ideas rather than committed features.
 
 ## Development
 
+Install the pre-commit hook after cloning:
+
+```bash
+uv run pre-commit install
+```
+
+The hook formats Python files with Ruff, runs Ruff checks, and type-checks
+`src/` with mypy. Run every hook manually with:
+
+```bash
+uv run pre-commit run --all-files
+```
+
 Run the full quality suite:
 
 ```bash
+uv run ruff format --check .
 uv run ruff check .
 uv run mypy src tests
 uv run pytest

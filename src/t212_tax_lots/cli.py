@@ -13,6 +13,7 @@ from t212_tax_lots.parser import (
     get_buy_transactions,
     get_sell_transactions,
     get_trade_transactions,
+    import_summary,
     read_transactions,
 )
 from t212_tax_lots.portfolio import (
@@ -39,8 +40,7 @@ InputPath = Annotated[
     Path,
     typer.Argument(
         help=(
-            "Trading 212 CSV export, or a directory containing CSV exports to "
-            "combine."
+            "Trading 212 CSV export, or a directory containing CSV exports to combine."
         ),
     ),
 ]
@@ -68,15 +68,56 @@ def _filter_ticker(df: pl.DataFrame, ticker: str | None) -> pl.DataFrame:
     return df.filter(pl.col("ticker") == ticker)
 
 
+def _read_input(input_path: Path, *, report_unsupported: bool) -> pl.DataFrame:
+    """Read validated input and report decisions that affect calculations."""
+    try:
+        df = read_transactions(input_path)
+    except (FileNotFoundError, ValueError) as error:
+        console.print(f"[bold red]Input error:[/bold red] {error}")
+        raise typer.Exit(code=1) from error
+
+    summary = import_summary(df)
+    if summary.duplicate_rows_removed:
+        console.print(
+            "[yellow]Import notice:[/yellow] removed "
+            f"{summary.duplicate_rows_removed} duplicate transaction row(s) from "
+            "overlapping exports."
+        )
+
+    if report_unsupported and summary.unsupported_action_counts:
+        actions = ", ".join(
+            f"{action} ({count})"
+            for action, count in sorted(summary.unsupported_action_counts.items())
+        )
+        console.print(
+            "[yellow]Unsupported actions:[/yellow] "
+            f"{actions}. These rows are not included in tax-lot calculations; "
+            "recognized buys and sells will continue to be processed."
+        )
+
+    return df
+
+
+def _calculation_error(error: ValueError) -> None:
+    """Print a concise processing error and terminate the command."""
+    console.print(f"[bold red]Processing error:[/bold red] {error}")
+    raise typer.Exit(code=1) from error
+
+
 @app.command()
 def inspect(input_path: InputPath) -> None:
     """Summarize files, rows, columns, trades, and transaction types."""
-    csv_files = find_csv_files(input_path)
-    df = read_transactions(input_path)
+    try:
+        csv_files = find_csv_files(input_path)
+    except (FileNotFoundError, ValueError) as error:
+        console.print(f"[bold red]Input error:[/bold red] {error}")
+        raise typer.Exit(code=1) from error
+    df = _read_input(input_path, report_unsupported=False)
 
     trades = get_trade_transactions(df)
     buys = get_buy_transactions(df)
     sells = get_sell_transactions(df)
+    summary = import_summary(df)
 
     overview_table = Table(title="Trading 212 CSV Overview")
     overview_table.add_column("Property")
@@ -88,6 +129,12 @@ def inspect(input_path: InputPath) -> None:
     overview_table.add_row("Trades", str(trades.height))
     overview_table.add_row("Buy transactions", str(buys.height))
     overview_table.add_row("Sell transactions", str(sells.height))
+    overview_table.add_row(
+        "Duplicate rows removed", str(summary.duplicate_rows_removed)
+    )
+    overview_table.add_row(
+        "Unsupported action types", str(len(summary.unsupported_action_counts))
+    )
     overview_table.add_row("Column names", ", ".join(df.columns))
 
     console.print(overview_table)
@@ -108,9 +155,16 @@ def inspect(input_path: InputPath) -> None:
     action_table = Table(title="Transaction Types")
     action_table.add_column("Action")
     action_table.add_column("Rows", justify="right")
+    action_table.add_column("Tax-lot processing")
 
     for row in action_counts.iter_rows(named=True):
-        action_table.add_row(str(row["action"]), str(row["len"]))
+        action = str(row["action"])
+        processing = (
+            "recognized"
+            if action not in summary.unsupported_action_counts
+            else "ignored"
+        )
+        action_table.add_row(action, str(row["len"]), processing)
 
     console.print(action_table)
 
@@ -126,8 +180,11 @@ def positions(
     ),
 ) -> None:
     """Show current positions after matching sells against buys using FIFO."""
-    df = read_transactions(input_path)
-    positions = _filter_ticker(positions_frame(df), ticker)
+    df = _read_input(input_path, report_unsupported=True)
+    try:
+        positions = _filter_ticker(positions_frame(df), ticker)
+    except ValueError as error:
+        _calculation_error(error)
 
     table = Table(title="Current Positions")
     table.add_column("Ticker")
@@ -170,11 +227,14 @@ def eligible_to_sell(
     ),
 ) -> None:
     """Show shares bought on or before the six-calendar-month cutoff."""
-    df = read_transactions(input_path)
-    eligibility = _filter_ticker(
-        eligible_to_sell_frame(df, as_of=as_of),
-        ticker,
-    )
+    df = _read_input(input_path, report_unsupported=True)
+    try:
+        eligibility = _filter_ticker(
+            eligible_to_sell_frame(df, as_of=as_of),
+            ticker,
+        )
+    except ValueError as error:
+        _calculation_error(error)
 
     table = Table(title="Shares Older Than 6 Months")
     table.add_column("Ticker")
@@ -208,8 +268,11 @@ def open_lots(
     ),
 ) -> None:
     """Show remaining FIFO buy lots after applying all recognized sells."""
-    df = read_transactions(input_path)
-    lots = _filter_ticker(open_lots_frame(df), ticker)
+    df = _read_input(input_path, report_unsupported=True)
+    try:
+        lots = _filter_ticker(open_lots_frame(df), ticker)
+    except ValueError as error:
+        _calculation_error(error)
 
     table = Table(title="Open Lots")
     table.add_column("Ticker")

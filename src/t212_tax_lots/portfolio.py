@@ -58,6 +58,10 @@ ELIGIBILITY_SCHEMA = {
 }
 
 
+class MissingAcquisitionHistoryError(ValueError):
+    """Raised when supplied exports do not contain enough buys for a sell."""
+
+
 @dataclass
 class Lot:
     """An open purchase lot.
@@ -129,7 +133,7 @@ def build_open_lots(transactions: pl.DataFrame) -> list[Lot]:
         raise ValueError(f"Missing required columns: {sorted(missing_columns)}")
 
     trades = transactions.filter(pl.col("action").is_in(list(TRADE_ACTIONS))).sort(
-        "time"
+        "time", nulls_last=True, maintain_order=True
     )
 
     open_lots: list[Lot] = []
@@ -138,8 +142,11 @@ def build_open_lots(transactions: pl.DataFrame) -> list[Lot]:
         action = row["action"]
         shares = row["shares"]
 
-        if shares is None:
-            continue
+        if row["time"] is None:
+            raise ValueError("Recognized trade has an invalid or empty Time value")
+
+        if shares is None or float(shares) <= 0:
+            raise ValueError("Recognized trade has an invalid share quantity")
 
         asset_key = _asset_key(row)
 
@@ -174,9 +181,12 @@ def build_open_lots(transactions: pl.DataFrame) -> list[Lot]:
                 shares_to_sell -= consumed_shares
 
             if shares_to_sell > FLOAT_TOLERANCE:
-                raise ValueError(
-                    f"Sell transaction for {asset_key} exceeds available shares "
-                    f"by {shares_to_sell:.8f}"
+                sell_time = row["time"].strftime("%Y-%m-%d %H:%M:%S")
+                raise MissingAcquisitionHistoryError(
+                    f"Sell for {asset_key} at {sell_time} cannot be matched: "
+                    f"{shares_to_sell:.8f} shares are missing from the supplied "
+                    "acquisition history. Upload exports covering purchases before "
+                    f"{sell_time} and try again."
                 )
 
     return [lot for lot in open_lots if lot.remaining_shares > FLOAT_TOLERANCE]
