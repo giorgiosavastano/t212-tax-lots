@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from t212-tax-lots!")
+"""Tools for analysing Trading 212 tax lots."""
