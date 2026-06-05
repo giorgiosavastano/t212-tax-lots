@@ -32,9 +32,7 @@ def test_inspect_reports_duplicates_and_unsupported_actions(tmp_path: Path) -> N
     duplicate = "Market buy,2025-01-02 03:04:05,TX-1,ISIN-A,AAPL,1\n"
     (tmp_path / "first.csv").write_text(header + duplicate)
     (tmp_path / "second.csv").write_text(
-        header
-        + duplicate
-        + "Dividend,2025-02-02 03:04:05,TX-2,ISIN-A,AAPL,\n"
+        header + duplicate + "Dividend,2025-02-02 03:04:05,TX-2,ISIN-A,AAPL,\n"
     )
 
     result = runner.invoke(app, ["inspect", str(tmp_path)])

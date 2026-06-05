@@ -152,9 +152,7 @@ def test_eligible_to_sell_frame_splits_old_and_new_lots() -> None:
         ]
     )
 
-    row = eligible_to_sell_frame(transactions, as_of="2025-08-01").row(
-        0, named=True
-    )
+    row = eligible_to_sell_frame(transactions, as_of="2025-08-01").row(0, named=True)
 
     assert row["six_month_cutoff"].isoformat() == "2025-02-01"
     assert row["eligible_shares"] == 2.0

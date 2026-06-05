@@ -264,7 +264,9 @@ def _format_rows(rows: list[int]) -> str:
 
 def _validate_normalized_export(df: pl.DataFrame, source_file: str) -> None:
     """Validate required values and formats in one normalized export."""
-    empty_actions = _invalid_rows(df, pl.col("action").is_null() | (pl.col("action") == ""))
+    empty_actions = _invalid_rows(
+        df, pl.col("action").is_null() | (pl.col("action") == "")
+    )
     if empty_actions:
         raise ExportValidationError(
             f"{source_file}: Action is empty at CSV row(s) {_format_rows(empty_actions)}"

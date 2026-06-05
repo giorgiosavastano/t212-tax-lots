@@ -225,9 +225,23 @@ These are ideas rather than committed features.
 
 ## Development
 
+Install the pre-commit hook after cloning:
+
+```bash
+uv run pre-commit install
+```
+
+The hook formats Python files with Ruff, runs Ruff checks, and type-checks
+`src/` with mypy. Run every hook manually with:
+
+```bash
+uv run pre-commit run --all-files
+```
+
 Run the full quality suite:
 
 ```bash
+uv run ruff format --check .
 uv run ruff check .
 uv run mypy src tests
 uv run pytest

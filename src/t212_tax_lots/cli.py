@@ -40,8 +40,7 @@ InputPath = Annotated[
     Path,
     typer.Argument(
         help=(
-            "Trading 212 CSV export, or a directory containing CSV exports to "
-            "combine."
+            "Trading 212 CSV export, or a directory containing CSV exports to combine."
         ),
     ),
 ]
@@ -160,7 +159,11 @@ def inspect(input_path: InputPath) -> None:
 
     for row in action_counts.iter_rows(named=True):
         action = str(row["action"])
-        processing = "recognized" if action not in summary.unsupported_action_counts else "ignored"
+        processing = (
+            "recognized"
+            if action not in summary.unsupported_action_counts
+            else "ignored"
+        )
         action_table.add_row(action, str(row["len"]), processing)
 
     console.print(action_table)

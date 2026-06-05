@@ -165,7 +165,9 @@ def test_read_single_csv_rejects_malformed_optional_numeric_value(
         )
     )
 
-    with pytest.raises(ExportValidationError, match="'price_per_share' must be numeric"):
+    with pytest.raises(
+        ExportValidationError, match="'price_per_share' must be numeric"
+    ):
         read_single_csv(path)
 
 
