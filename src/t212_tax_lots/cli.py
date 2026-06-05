@@ -1,6 +1,7 @@
 """Command-line interface for analysing Trading 212 transaction exports."""
 
 from pathlib import Path
+from typing import Annotated
 
 import polars as pl
 import typer
@@ -21,10 +22,28 @@ from t212_tax_lots.portfolio import (
 )
 
 app = typer.Typer(
-    help="Analyse Trading 212 CSV exports and track share lots older than 6 months."
+    help=(
+        "Analyse Trading 212 CSV exports, calculate open positions using FIFO, "
+        "and track share lots older than six calendar months."
+    ),
+    no_args_is_help=True,
+    epilog=(
+        "INPUT_PATH may be one Trading 212 CSV export or a directory containing "
+        "CSV exports. This tool assists analysis and does not provide tax advice."
+    ),
 )
 
 console = Console()
+
+InputPath = Annotated[
+    Path,
+    typer.Argument(
+        help=(
+            "Trading 212 CSV export, or a directory containing CSV exports to "
+            "combine."
+        ),
+    ),
+]
 
 
 @app.callback()
@@ -50,8 +69,8 @@ def _filter_ticker(df: pl.DataFrame, ticker: str | None) -> pl.DataFrame:
 
 
 @app.command()
-def inspect(input_path: Path) -> None:
-    """Inspect one Trading 212 CSV export or a folder of CSV exports."""
+def inspect(input_path: InputPath) -> None:
+    """Summarize files, rows, columns, trades, and transaction types."""
     csv_files = find_csv_files(input_path)
     df = read_transactions(input_path)
 
@@ -98,7 +117,7 @@ def inspect(input_path: Path) -> None:
 
 @app.command()
 def positions(
-    input_path: Path,
+    input_path: InputPath,
     ticker: str | None = typer.Option(
         None,
         "--ticker",
@@ -106,7 +125,7 @@ def positions(
         help="Only show positions for this ticker.",
     ),
 ) -> None:
-    """Show current open positions after applying buys and sells."""
+    """Show current positions after matching sells against buys using FIFO."""
     df = read_transactions(input_path)
     positions = _filter_ticker(positions_frame(df), ticker)
 
@@ -133,11 +152,15 @@ def positions(
 
 @app.command("eligible-to-sell")
 def eligible_to_sell(
-    input_path: Path,
+    input_path: InputPath,
     as_of: str | None = typer.Option(
         None,
         "--as-of",
-        help="Date used for the 6-month check, formatted as YYYY-MM-DD. Defaults to today.",
+        help=(
+            "Date used for the six-calendar-month check, formatted as "
+            "YYYY-MM-DD. Lots bought on or before the cutoff are included. "
+            "Defaults to today."
+        ),
     ),
     ticker: str | None = typer.Option(
         None,
@@ -146,7 +169,7 @@ def eligible_to_sell(
         help="Only show eligibility for this ticker.",
     ),
 ) -> None:
-    """Show how many shares are older than 6 calendar months."""
+    """Show shares bought on or before the six-calendar-month cutoff."""
     df = read_transactions(input_path)
     eligibility = _filter_ticker(
         eligible_to_sell_frame(df, as_of=as_of),
@@ -176,7 +199,7 @@ def eligible_to_sell(
 
 @app.command("open-lots")
 def open_lots(
-    input_path: Path,
+    input_path: InputPath,
     ticker: str | None = typer.Option(
         None,
         "--ticker",
@@ -184,7 +207,7 @@ def open_lots(
         help="Only show open lots for this ticker.",
     ),
 ) -> None:
-    """Show the underlying open buy lots used by the calculations."""
+    """Show remaining FIFO buy lots after applying all recognized sells."""
     df = read_transactions(input_path)
     lots = _filter_ticker(open_lots_frame(df), ticker)
 
