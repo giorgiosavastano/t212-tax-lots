@@ -344,10 +344,12 @@ def _validate_transaction_id_consistency(transactions: pl.DataFrame) -> None:
 
 def _deduplicate_transactions(transactions: pl.DataFrame) -> pl.DataFrame:
     """Remove overlap duplicates while retaining compact provenance."""
-    kept_rows: list[dict[str, Any]] = []
+    kept_indices: list[int] = []
+    duplicate_counts: list[int] = []
+    duplicate_source_files: list[set[str]] = []
     row_index_by_identity: dict[tuple[Any, ...], int] = {}
 
-    for row in transactions.iter_rows(named=True):
+    for source_index, row in enumerate(transactions.iter_rows(named=True)):
         transaction_id = row.get("id")
         if transaction_id is not None:
             identity = ("id", str(transaction_id))
@@ -358,21 +360,27 @@ def _deduplicate_transactions(transactions: pl.DataFrame) -> pl.DataFrame:
 
         existing_index = row_index_by_identity.get(identity)
         if existing_index is not None:
-            existing = kept_rows[existing_index]
-            if transaction_id is not None or existing["source_file"] != row["source_file"]:
-                existing["duplicate_count"] += 1
-                existing["duplicate_source_files"].add(str(row["source_file"]))
+            existing_source = transactions["source_file"][kept_indices[existing_index]]
+            if transaction_id is not None or existing_source != row["source_file"]:
+                duplicate_counts[existing_index] += 1
+                duplicate_source_files[existing_index].add(str(row["source_file"]))
                 continue
 
-        row_index_by_identity[identity] = len(kept_rows)
-        row["duplicate_count"] = 1
-        row["duplicate_source_files"] = {str(row["source_file"])}
-        kept_rows.append(row)
+        # Keep the first no-ID identity as the cross-file overlap reference.
+        # Identical rows within the same file remain separate transactions.
+        row_index_by_identity.setdefault(identity, len(kept_indices))
+        kept_indices.append(source_index)
+        duplicate_counts.append(1)
+        duplicate_source_files.append({str(row["source_file"])})
 
-    for row in kept_rows:
-        row["duplicate_source_files"] = ", ".join(sorted(row["duplicate_source_files"]))
-
-    return pl.DataFrame(kept_rows)
+    return transactions[kept_indices].with_columns(
+        pl.Series("duplicate_count", duplicate_counts, dtype=pl.UInt32),
+        pl.Series(
+            "duplicate_source_files",
+            [", ".join(sorted(files)) for files in duplicate_source_files],
+            dtype=pl.String,
+        ),
+    )
 
 
 def import_summary(df: pl.DataFrame) -> ImportSummary:

@@ -198,3 +198,20 @@ def test_import_summary_reports_unsupported_actions(tmp_path: Path) -> None:
     summary = import_summary(read_transactions(path))
 
     assert summary.unsupported_action_counts == {"Dividend": 1, "Interest on cash": 1}
+
+
+def test_deduplication_preserves_schema_when_later_optional_value_is_numeric(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        f"Dividend,2025-01-01 00:{minute // 60:02}:{minute % 60:02},TX-{minute},"
+        for minute in range(100)
+    ]
+    rows.append("Dividend,2025-01-01 01:40:00,TX-100,0.0")
+    path = tmp_path / "export.csv"
+    path.write_text("\n".join(["Action,Time,ID,Result", *rows]))
+
+    df = read_transactions(path)
+
+    assert df.schema["result"] == pl.Float64
+    assert df["result"][-1] == 0.0
