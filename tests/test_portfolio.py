@@ -4,6 +4,7 @@ import polars as pl
 import pytest
 
 from t212_tax_lots.portfolio import (
+    MissingAcquisitionHistoryError,
     build_open_lots,
     eligible_to_sell_frame,
     open_lots_frame,
@@ -92,7 +93,10 @@ def test_build_open_lots_rejects_oversold_asset() -> None:
         ]
     )
 
-    with pytest.raises(ValueError, match="exceeds available shares"):
+    with pytest.raises(
+        MissingAcquisitionHistoryError,
+        match="missing from the supplied acquisition history.*Upload exports",
+    ):
         build_open_lots(transactions)
 
 
