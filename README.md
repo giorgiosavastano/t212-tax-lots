@@ -183,8 +183,8 @@ uv run t212-tax-lots disposals data/ --threshold-months 12 --ticker AAPL
 
 The detail table shows sell proceeds, matched buy dates and quantities, cost
 basis, realized gain/loss, holding days, and whether each matched lot is above
-or below the threshold. The summary table reports totals by ticker/currency and
-overall.
+or below the threshold. Summary tables are split by calculation currency and
+include totals by ticker plus an overall total for that currency.
 
 The report prefers quantity multiplied by `Price / share` in the instrument's
 `Currency (Price / share)`. This keeps a buy and sell comparable when a Trading

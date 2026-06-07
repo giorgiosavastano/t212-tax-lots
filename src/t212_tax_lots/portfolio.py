@@ -580,8 +580,10 @@ def disposal_summary_frame(matches: pl.DataFrame) -> pl.DataFrame:
 
     rows = list(matches.iter_rows(named=True))
     groups: dict[tuple[str | None, str | None], list[dict[str, Any]]] = {}
+    currency_groups: dict[str | None, list[dict[str, Any]]] = {}
     for row in rows:
         groups.setdefault((row["ticker"], row["currency"]), []).append(row)
+        currency_groups.setdefault(row["currency"], []).append(row)
 
     summary_rows: list[dict[str, Any]] = []
     for scope, grouped_rows in [
@@ -591,42 +593,34 @@ def disposal_summary_frame(matches: pl.DataFrame) -> pl.DataFrame:
                 groups.items(), key=lambda item: (str(item[0][0]), str(item[0][1]))
             )
         ),
-        ("overall", rows),
+        *(
+            ("overall", group_rows)
+            for _, group_rows in sorted(
+                currency_groups.items(), key=lambda item: str(item[0])
+            )
+        ),
     ]:
         holding_days = [
             int(row["holding_days"])
             for row in grouped_rows
             if row["holding_days"] is not None
         ]
-        currencies = {row["currency"] for row in grouped_rows}
-        warnings: list[str] = []
-        if len(currencies) > 1:
-            warnings.append("mixed currencies: monetary totals unavailable")
+        currency = grouped_rows[0]["currency"]
 
         summary_rows.append(
             {
                 "scope": scope,
                 "ticker": grouped_rows[0]["ticker"] if scope == "ticker" else "ALL",
-                "currency": (next(iter(currencies)) if len(currencies) == 1 else None),
-                "total_proceeds": (
-                    _complete_sum(grouped_rows, "sell_proceeds")
-                    if len(currencies) == 1
-                    else None
-                ),
-                "total_cost_basis": (
-                    _complete_sum(grouped_rows, "cost_basis")
-                    if len(currencies) == 1
-                    else None
-                ),
-                "total_realized_gain_loss": (
-                    _complete_sum(grouped_rows, "realized_gain_loss")
-                    if len(currencies) == 1
-                    else None
+                "currency": currency,
+                "total_proceeds": _complete_sum(grouped_rows, "sell_proceeds"),
+                "total_cost_basis": _complete_sum(grouped_rows, "cost_basis"),
+                "total_realized_gain_loss": _complete_sum(
+                    grouped_rows, "realized_gain_loss"
                 ),
                 "disposals": len({row["disposal_id"] for row in grouped_rows}),
                 "shortest_holding_days": min(holding_days) if holding_days else None,
                 "longest_holding_days": max(holding_days) if holding_days else None,
-                "warning": _warning_text(warnings),
+                "warning": None,
             }
         )
 

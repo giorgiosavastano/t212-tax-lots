@@ -2,7 +2,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from t212_tax_lots.cli import app
+from t212_tax_lots.cli import _format_holding, app
 
 
 runner = CliRunner()
@@ -99,6 +99,12 @@ def test_positions_reports_invalid_export_cleanly(tmp_path: Path) -> None:
     assert "missing required Trading 212 columns: Time" in result.stdout
 
 
+def test_format_holding_colors_threshold_status() -> None:
+    assert _format_holding(212, True, 6) == "[green]212d (above 6m)[/green]"
+    assert _format_holding(31, False, 6) == "[red]31d (below 6m)[/red]"
+    assert _format_holding(None, None, 6) == "unknown"
+
+
 def test_disposals_reports_fifo_details_summary_and_unmatched_warning(
     tmp_path: Path,
 ) -> None:
@@ -156,3 +162,55 @@ def test_disposals_uses_instrument_currency_and_shows_ticker_for_matched_lots(
     assert "1.00 USD" in normalized_output
     assert "unknown USD" not in normalized_output
     assert "buy and sell currencies differ" not in normalized_output
+
+
+def test_disposals_prints_separate_summary_tables_per_currency(tmp_path: Path) -> None:
+    path = tmp_path / "mixed-currency.csv"
+    path.write_text(
+        "\n".join(
+            [
+                "Action,Time,ID,ISIN,Ticker,Name,No. of shares,Price / share,"
+                "Currency (Price / share)",
+                "Market buy,2025-01-01 09:00:00,B-1,ISIN-A,AAPL,Apple,1,10,USD",
+                "Market sell,2025-08-01 09:00:00,S-1,ISIN-A,AAPL,Apple,1,12,USD",
+                "Market buy,2025-01-02 09:00:00,B-2,ISIN-B,SAP,SAP,1,20,EUR",
+                "Market sell,2025-08-02 09:00:00,S-2,ISIN-B,SAP,SAP,1,18,EUR",
+            ]
+        )
+    )
+
+    result = runner.invoke(app, ["disposals", str(path)], terminal_width=160)
+    normalized_output = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "Disposal Summary (EUR)" in normalized_output
+    assert "Disposal Summary (USD)" in normalized_output
+    assert "18.00 EUR" in normalized_output
+    assert "-2.00 EUR" in normalized_output
+    assert "12.00 USD" in normalized_output
+    assert "2.00 USD" in normalized_output
+    assert "mixed currencies" not in normalized_output
+
+
+def test_disposals_marks_above_and_below_threshold_holding_periods(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "threshold.csv"
+    path.write_text(
+        "\n".join(
+            [
+                "Action,Time,ID,ISIN,Ticker,Name,No. of shares,Price / share,"
+                "Currency (Price / share)",
+                "Market buy,2025-01-01 09:00:00,B-1,ISIN-A,AAPL,Apple,1,10,USD",
+                "Market buy,2025-07-01 09:00:00,B-2,ISIN-A,AAPL,Apple,1,11,USD",
+                "Market sell,2025-08-01 09:00:00,S-1,ISIN-A,AAPL,Apple,2,12,USD",
+            ]
+        )
+    )
+
+    result = runner.invoke(app, ["disposals", str(path)], terminal_width=160)
+    normalized_output = " ".join(result.stdout.split())
+
+    assert result.exit_code == 0
+    assert "212d" in normalized_output
+    assert "31d" in normalized_output

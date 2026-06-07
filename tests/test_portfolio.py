@@ -449,3 +449,61 @@ def test_disposal_keeps_basis_unknown_when_only_cash_currencies_differ() -> None
     assert row["cost_basis"] is None
     assert row["realized_gain_loss"] is None
     assert "buy and sell currencies differ" in row["warning"]
+
+
+def test_disposal_summary_reports_overall_totals_per_currency() -> None:
+    transactions = _transactions(
+        [
+            {
+                "action": "Market buy",
+                "time": datetime(2025, 1, 1),
+                "shares": 1.0,
+                "ticker": "AAA",
+                "isin": "ISIN-AAA",
+                "price_per_share": 10.0,
+                "price_currency": "USD",
+            },
+            {
+                "action": "Market sell",
+                "time": datetime(2025, 8, 1),
+                "shares": 1.0,
+                "ticker": "AAA",
+                "isin": "ISIN-AAA",
+                "price_per_share": 12.0,
+                "price_currency": "USD",
+            },
+            {
+                "action": "Market buy",
+                "time": datetime(2025, 1, 2),
+                "shares": 1.0,
+                "ticker": "BBB",
+                "isin": "ISIN-BBB",
+                "price_per_share": 20.0,
+                "price_currency": "EUR",
+            },
+            {
+                "action": "Market sell",
+                "time": datetime(2025, 8, 2),
+                "shares": 1.0,
+                "ticker": "BBB",
+                "isin": "ISIN-BBB",
+                "price_per_share": 18.0,
+                "price_currency": "EUR",
+            },
+        ]
+    )
+
+    overall = disposal_summary_frame(disposal_matches_frame(transactions)).filter(
+        pl.col("scope") == "overall"
+    )
+    overall_by_currency = {
+        row["currency"]: row for row in overall.iter_rows(named=True)
+    }
+
+    assert set(overall_by_currency) == {"EUR", "USD"}
+    assert overall_by_currency["USD"]["total_proceeds"] == 12.0
+    assert overall_by_currency["USD"]["total_cost_basis"] == 10.0
+    assert overall_by_currency["USD"]["total_realized_gain_loss"] == 2.0
+    assert overall_by_currency["EUR"]["total_proceeds"] == 18.0
+    assert overall_by_currency["EUR"]["total_cost_basis"] == 20.0
+    assert overall_by_currency["EUR"]["total_realized_gain_loss"] == -2.0

@@ -76,6 +76,20 @@ def _format_money_with_currency(value: float | None, currency: str | None) -> st
     return f"{_format_money(value)} {currency or ''}".rstrip()
 
 
+def _format_holding(
+    holding_days: int | None,
+    above_threshold: bool | None,
+    threshold_months: int,
+) -> str:
+    """Format holding-period status with terminal color for quick scanning."""
+    if holding_days is None or above_threshold is None:
+        return "unknown"
+
+    status = "above" if above_threshold else "below"
+    color = "green" if above_threshold else "red"
+    return f"[{color}]{holding_days}d ({status} {threshold_months}m)[/{color}]"
+
+
 def _filter_ticker(df: pl.DataFrame, ticker: str | None) -> pl.DataFrame:
     """Optionally filter a DataFrame to a single ticker."""
     if ticker is None:
@@ -383,15 +397,6 @@ def disposals(
     matches_table.add_column("Holding")
 
     for row in match_rows:
-        holding = (
-            "unknown"
-            if row["holding_days"] is None
-            else (
-                f"{row['holding_days']}d "
-                f"({'above' if row['above_threshold'] else 'below'} "
-                f"{threshold_months}m)"
-            )
-        )
         matches_table.add_row(
             str(row["disposal_id"]),
             str(row["ticker"] or ""),
@@ -399,44 +404,56 @@ def disposals(
             _format_float(row["matched_shares"]),
             _format_money_with_currency(row["cost_basis"], row["currency"]),
             _format_money_with_currency(row["realized_gain_loss"], row["currency"]),
-            holding,
+            _format_holding(
+                row["holding_days"], row["above_threshold"], threshold_months
+            ),
         )
 
     console.print(matches_table)
 
-    summary_table = Table(title="Disposal Summary")
-    summary_table.add_column("Scope")
-    summary_table.add_column("Ticker")
-    summary_table.add_column("Disposals", justify="right")
-    summary_table.add_column("Proceeds", justify="right")
-    summary_table.add_column("Cost basis", justify="right")
-    summary_table.add_column("Gain/loss", justify="right")
-    summary_table.add_column("Shortest")
-    summary_table.add_column("Longest")
+    summary_rows = list(summary.iter_rows(named=True))
+    summary_currencies = sorted(
+        {row["currency"] for row in summary_rows},
+        key=lambda value: str(value),
+    )
+    for currency in summary_currencies:
+        currency_label = str(currency or "unknown currency")
+        summary_table = Table(title=f"Disposal Summary ({currency_label})")
+        summary_table.add_column("Scope")
+        summary_table.add_column("Ticker")
+        summary_table.add_column("Disposals", justify="right")
+        summary_table.add_column("Proceeds", justify="right")
+        summary_table.add_column("Cost basis", justify="right")
+        summary_table.add_column("Gain/loss", justify="right")
+        summary_table.add_column("Shortest")
+        summary_table.add_column("Longest")
 
-    for row in summary.iter_rows(named=True):
-        summary_table.add_row(
-            str(row["scope"]),
-            str(row["ticker"] or ""),
-            str(row["disposals"]),
-            _format_money_with_currency(row["total_proceeds"], row["currency"]),
-            _format_money_with_currency(row["total_cost_basis"], row["currency"]),
-            _format_money_with_currency(
-                row["total_realized_gain_loss"], row["currency"]
-            ),
-            (
-                "unknown"
-                if row["shortest_holding_days"] is None
-                else f"{row['shortest_holding_days']}d"
-            ),
-            (
-                "unknown"
-                if row["longest_holding_days"] is None
-                else f"{row['longest_holding_days']}d"
-            ),
-        )
+        for row in summary_rows:
+            if row["currency"] != currency:
+                continue
 
-    console.print(summary_table)
+            summary_table.add_row(
+                str(row["scope"]),
+                str(row["ticker"] or ""),
+                str(row["disposals"]),
+                _format_money_with_currency(row["total_proceeds"], row["currency"]),
+                _format_money_with_currency(row["total_cost_basis"], row["currency"]),
+                _format_money_with_currency(
+                    row["total_realized_gain_loss"], row["currency"]
+                ),
+                (
+                    "unknown"
+                    if row["shortest_holding_days"] is None
+                    else f"{row['shortest_holding_days']}d"
+                ),
+                (
+                    "unknown"
+                    if row["longest_holding_days"] is None
+                    else f"{row['longest_holding_days']}d"
+                ),
+            )
+
+        console.print(summary_table)
 
     warning_contexts: dict[str, set[str]] = {}
     for row in match_rows:
@@ -444,7 +461,7 @@ def disposals(
             warning_contexts.setdefault(str(row["warning"]), set()).add(
                 str(row["disposal_id"])
             )
-    for row in summary.iter_rows(named=True):
+    for row in summary_rows:
         if row["warning"]:
             warning_contexts.setdefault(str(row["warning"]), set()).add(
                 f"{row['scope']} {row['ticker'] or ''}".rstrip()
