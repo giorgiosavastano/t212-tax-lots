@@ -17,6 +17,7 @@ from t212_tax_lots.parser import (
     read_transactions,
 )
 from t212_tax_lots.portfolio import (
+    cash_movements_frame,
     disposal_matches_frame,
     disposal_summary_frame,
     eligible_to_sell_frame,
@@ -342,14 +343,26 @@ def disposals(
         "-t",
         help="Only show disposals for this ticker.",
     ),
+    reporting_currency: str = typer.Option(
+        "EUR",
+        "--reporting-currency",
+        "-c",
+        help="Currency used for authoritative realized gain/loss totals.",
+    ),
 ) -> None:
     """Show realized FIFO disposal matches, holding periods, and totals."""
     df = _read_input(input_path, report_unsupported=True)
     try:
         matches = _filter_ticker(
-            disposal_matches_frame(df, threshold_months=threshold_months), ticker
+            disposal_matches_frame(
+                df,
+                threshold_months=threshold_months,
+                reporting_currency=reporting_currency,
+            ),
+            ticker,
         )
         summary = disposal_summary_frame(matches)
+        cash_movements = cash_movements_frame(matches)
     except ValueError as error:
         _calculation_error(error)
 
@@ -392,8 +405,11 @@ def disposals(
     matches_table.add_column("Ticker")
     matches_table.add_column("Buy date")
     matches_table.add_column("Matched", justify="right")
-    matches_table.add_column("Cost basis", justify="right")
+    matches_table.add_column("Basis", justify="right")
+    matches_table.add_column("Net proceeds", justify="right")
     matches_table.add_column("Gain/loss", justify="right")
+    matches_table.add_column("Orig basis", justify="right")
+    matches_table.add_column("Original G/L", justify="right")
     matches_table.add_column("Holding")
 
     for row in match_rows:
@@ -402,8 +418,19 @@ def disposals(
             str(row["ticker"] or ""),
             str(row["buy_date"] or ""),
             _format_float(row["matched_shares"]),
+            _format_money_with_currency(
+                row["cost_basis_reporting"], row["reporting_currency"]
+            ),
+            _format_money_with_currency(
+                row["net_proceeds_reporting"], row["reporting_currency"]
+            ),
+            _format_money_with_currency(
+                row["realized_gain_loss_reporting"], row["reporting_currency"]
+            ),
             _format_money_with_currency(row["cost_basis"], row["currency"]),
-            _format_money_with_currency(row["realized_gain_loss"], row["currency"]),
+            _format_money_with_currency(
+                row["original_gain_loss"], row["original_gain_loss_currency"]
+            ),
             _format_holding(
                 row["holding_days"], row["above_threshold"], threshold_months
             ),
@@ -422,7 +449,7 @@ def disposals(
         summary_table.add_column("Scope")
         summary_table.add_column("Ticker")
         summary_table.add_column("Disposals", justify="right")
-        summary_table.add_column("Proceeds", justify="right")
+        summary_table.add_column("Net proceeds", justify="right")
         summary_table.add_column("Cost basis", justify="right")
         summary_table.add_column("Gain/loss", justify="right")
         summary_table.add_column("Shortest")
@@ -436,10 +463,15 @@ def disposals(
                 str(row["scope"]),
                 str(row["ticker"] or ""),
                 str(row["disposals"]),
-                _format_money_with_currency(row["total_proceeds"], row["currency"]),
-                _format_money_with_currency(row["total_cost_basis"], row["currency"]),
                 _format_money_with_currency(
-                    row["total_realized_gain_loss"], row["currency"]
+                    row["total_net_proceeds_reporting"], row["reporting_currency"]
+                ),
+                _format_money_with_currency(
+                    row["total_cost_basis_reporting"], row["reporting_currency"]
+                ),
+                _format_money_with_currency(
+                    row["total_realized_gain_loss_reporting"],
+                    row["reporting_currency"],
                 ),
                 (
                     "unknown"
@@ -454,6 +486,57 @@ def disposals(
             )
 
         console.print(summary_table)
+
+    overall_reporting_rows = [
+        row
+        for row in summary_rows
+        if row["scope"] == "overall"
+        and row["total_realized_gain_loss_reporting"] is not None
+    ]
+    if overall_reporting_rows:
+        total_gain = sum(
+            max(0.0, float(row["total_realized_gain_loss_reporting"]))
+            for row in overall_reporting_rows
+        )
+        total_loss = sum(
+            min(0.0, float(row["total_realized_gain_loss_reporting"]))
+            for row in overall_reporting_rows
+        )
+        reporting_label = reporting_currency.upper()
+        totals_table = Table(title=f"Authoritative Realized Result ({reporting_label})")
+        totals_table.add_column("Metric")
+        totals_table.add_column("Value", justify="right")
+        totals_table.add_row(
+            "Total gains", _format_money_with_currency(total_gain, reporting_label)
+        )
+        totals_table.add_row(
+            "Total losses", _format_money_with_currency(total_loss, reporting_label)
+        )
+        totals_table.add_row(
+            "Net gain/loss",
+            _format_money_with_currency(total_gain + total_loss, reporting_label),
+        )
+        totals_table.add_row(
+            "Sell transactions",
+            str(len({row["disposal_id"] for row in match_rows})),
+        )
+        totals_table.add_row("Matched lots", str(len(match_rows)))
+        totals_table.add_row(
+            "Warnings",
+            str(sum(1 for row in match_rows if row["warning"])),
+        )
+        console.print(totals_table)
+
+    if not cash_movements.is_empty():
+        cash_table = Table(title="Cash Movements By Currency")
+        cash_table.add_column("Currency")
+        cash_table.add_column("Cash impact", justify="right")
+        for row in cash_movements.iter_rows(named=True):
+            cash_table.add_row(
+                str(row["currency"]),
+                _format_money_with_currency(row["cash_impact"], row["currency"]),
+            )
+        console.print(cash_table)
 
     warning_contexts: dict[str, set[str]] = {}
     for row in match_rows:

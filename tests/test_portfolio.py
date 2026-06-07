@@ -4,8 +4,10 @@ import polars as pl
 import pytest
 
 from t212_tax_lots.portfolio import (
+    DISPOSAL_MATCHES_SCHEMA,
     MissingAcquisitionHistoryError,
     build_open_lots,
+    cash_movements_frame,
     disposal_matches_frame,
     disposal_summary_frame,
     eligible_to_sell_frame,
@@ -208,25 +210,7 @@ def test_empty_frames_keep_function_specific_schemas() -> None:
         "newest_buy_date",
         "not_yet_eligible_shares",
     ]
-    assert disposal_matches_frame(transactions).columns == [
-        "disposal_id",
-        "ticker",
-        "name",
-        "isin",
-        "sell_time",
-        "sell_date",
-        "sold_shares",
-        "sell_proceeds",
-        "currency",
-        "buy_date",
-        "matched_shares",
-        "cost_basis",
-        "realized_gain_loss",
-        "holding_days",
-        "threshold_months",
-        "above_threshold",
-        "warning",
-    ]
+    assert disposal_matches_frame(transactions).columns == list(DISPOSAL_MATCHES_SCHEMA)
 
 
 def test_disposal_matches_simple_partial_sale_and_fee_adjusted_gain() -> None:
@@ -266,6 +250,9 @@ def test_disposal_matches_simple_partial_sale_and_fee_adjusted_gain() -> None:
     assert row["sell_proceeds"] == pytest.approx(59.6)
     assert row["cost_basis"] == pytest.approx(40.4)
     assert row["realized_gain_loss"] == pytest.approx(19.2)
+    assert row["cost_basis_reporting"] == pytest.approx(40.4)
+    assert row["net_proceeds_reporting"] == pytest.approx(59.6)
+    assert row["realized_gain_loss_reporting"] == pytest.approx(19.2)
     assert row["holding_days"] == 212
     assert row["above_threshold"] is True
 
@@ -411,13 +398,133 @@ def test_disposal_uses_common_instrument_currency_when_cash_currencies_differ() 
         ]
     )
 
-    row = disposal_matches_frame(transactions).row(0, named=True)
+    row = disposal_matches_frame(transactions, reporting_currency="USD").row(
+        0, named=True
+    )
 
     assert row["sell_proceeds"] == 12.0
     assert row["cost_basis"] == 11.0
     assert row["realized_gain_loss"] == 1.0
     assert row["currency"] == "USD"
     assert row["warning"] is None
+
+
+def test_disposal_reports_reporting_currency_result_and_usd_cash_movement() -> None:
+    transactions = _transactions(
+        [
+            {
+                "action": "Market buy",
+                "time": datetime(2025, 1, 1),
+                "id": "B-1",
+                "shares": 1.0,
+                "ticker": "AAA",
+                "isin": "ISIN-AAA",
+                "price_per_share": 100.0,
+                "price_currency": "USD",
+                "total": 100.0,
+                "total_currency": "USD",
+                "exchange_rate": 0.9,
+            },
+            {
+                "action": "Market sell",
+                "time": datetime(2025, 8, 1),
+                "id": "S-1",
+                "shares": 1.0,
+                "ticker": "AAA",
+                "isin": "ISIN-AAA",
+                "price_per_share": 110.0,
+                "price_currency": "USD",
+                "total": 110.0,
+                "total_currency": "USD",
+                "exchange_rate": 0.8,
+            },
+        ]
+    )
+
+    matches = disposal_matches_frame(transactions)
+    row = matches.row(0, named=True)
+
+    assert row["buy_transaction_id"] == "B-1"
+    assert row["sell_transaction_id"] == "S-1"
+    assert row["buy_gross"] == 100.0
+    assert row["sell_gross"] == 110.0
+    assert row["original_gain_loss"] == 10.0
+    assert row["original_gain_loss_currency"] == "USD"
+    assert row["cost_basis_reporting"] == pytest.approx(90.0)
+    assert row["net_proceeds_reporting"] == pytest.approx(88.0)
+    assert row["realized_gain_loss_reporting"] == pytest.approx(-2.0)
+    assert row["cash_currency"] == "USD"
+    assert row["cash_impact"] == 110.0
+
+    cash = cash_movements_frame(matches).row(0, named=True)
+    assert cash == {"currency": "USD", "cash_impact": 110.0}
+
+
+def test_disposal_includes_buy_and_sell_fees_in_reporting_result() -> None:
+    transactions = _transactions(
+        [
+            {
+                "action": "Market buy",
+                "time": datetime(2025, 1, 1),
+                "shares": 1.0,
+                "ticker": "AAA",
+                "isin": "ISIN-AAA",
+                "total": 100.0,
+                "total_currency": "EUR",
+                "currency_conversion_fee": 2.0,
+                "currency_conversion_fee_currency": "EUR",
+            },
+            {
+                "action": "Market sell",
+                "time": datetime(2025, 8, 1),
+                "shares": 1.0,
+                "ticker": "AAA",
+                "isin": "ISIN-AAA",
+                "total": 120.0,
+                "total_currency": "EUR",
+                "currency_conversion_fee": 3.0,
+                "currency_conversion_fee_currency": "EUR",
+            },
+        ]
+    )
+
+    row = disposal_matches_frame(transactions).row(0, named=True)
+
+    assert row["cost_basis_reporting"] == 102.0
+    assert row["gross_proceeds_reporting"] == 120.0
+    assert row["sell_fees_reporting"] == 3.0
+    assert row["net_proceeds_reporting"] == 117.0
+    assert row["realized_gain_loss_reporting"] == 15.0
+
+
+def test_disposal_reports_missing_fx_without_guessing() -> None:
+    transactions = _transactions(
+        [
+            {
+                "action": "Market buy",
+                "time": datetime(2025, 1, 1),
+                "shares": 1.0,
+                "ticker": "AAA",
+                "isin": "ISIN-AAA",
+                "price_per_share": 10.0,
+                "price_currency": "USD",
+            },
+            {
+                "action": "Market sell",
+                "time": datetime(2025, 8, 1),
+                "shares": 1.0,
+                "ticker": "AAA",
+                "isin": "ISIN-AAA",
+                "price_per_share": 12.0,
+                "price_currency": "USD",
+            },
+        ]
+    )
+
+    row = disposal_matches_frame(transactions).row(0, named=True)
+
+    assert row["realized_gain_loss_reporting"] is None
+    assert "missing FX rate from USD to EUR" in row["warning"]
 
 
 def test_disposal_keeps_basis_unknown_when_only_cash_currencies_differ() -> None:

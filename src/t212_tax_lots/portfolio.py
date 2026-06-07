@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 import polars as pl
@@ -60,6 +61,8 @@ ELIGIBILITY_SCHEMA = {
 
 DISPOSAL_MATCHES_SCHEMA = {
     "disposal_id": pl.String,
+    "buy_transaction_id": pl.String,
+    "sell_transaction_id": pl.String,
     "ticker": pl.String,
     "name": pl.String,
     "isin": pl.String,
@@ -72,6 +75,28 @@ DISPOSAL_MATCHES_SCHEMA = {
     "matched_shares": pl.Float64,
     "cost_basis": pl.Float64,
     "realized_gain_loss": pl.Float64,
+    "reporting_currency": pl.String,
+    "buy_gross": pl.Float64,
+    "buy_currency": pl.String,
+    "buy_fee": pl.Float64,
+    "buy_fee_currency": pl.String,
+    "buy_fx_rate": pl.Float64,
+    "cost_basis_reporting": pl.Float64,
+    "sell_gross": pl.Float64,
+    "sell_currency": pl.String,
+    "sell_fee": pl.Float64,
+    "sell_fee_currency": pl.String,
+    "sell_fx_rate": pl.Float64,
+    "gross_proceeds_reporting": pl.Float64,
+    "sell_fees_reporting": pl.Float64,
+    "net_proceeds_reporting": pl.Float64,
+    "realized_gain_loss_reporting": pl.Float64,
+    "original_gain_loss": pl.Float64,
+    "original_gain_loss_currency": pl.String,
+    "cash_currency": pl.String,
+    "cash_impact": pl.Float64,
+    "fee_cash_currency": pl.String,
+    "fee_cash_impact": pl.Float64,
     "holding_days": pl.Int64,
     "threshold_months": pl.Int64,
     "above_threshold": pl.Boolean,
@@ -82,13 +107,25 @@ DISPOSAL_SUMMARY_SCHEMA = {
     "scope": pl.String,
     "ticker": pl.String,
     "currency": pl.String,
+    "reporting_currency": pl.String,
     "total_proceeds": pl.Float64,
     "total_cost_basis": pl.Float64,
     "total_realized_gain_loss": pl.Float64,
+    "total_gross_proceeds_reporting": pl.Float64,
+    "total_fees_reporting": pl.Float64,
+    "total_net_proceeds_reporting": pl.Float64,
+    "total_cost_basis_reporting": pl.Float64,
+    "total_realized_gain_loss_reporting": pl.Float64,
     "disposals": pl.UInt32,
+    "matched_lots": pl.UInt32,
     "shortest_holding_days": pl.Int64,
     "longest_holding_days": pl.Int64,
     "warning": pl.String,
+}
+
+CASH_MOVEMENTS_SCHEMA = {
+    "currency": pl.String,
+    "cash_impact": pl.Float64,
 }
 
 
@@ -128,6 +165,12 @@ class DisposalLot:
     amount_per_share: float | None
     currency: str | None
     warning: str | None
+    transaction_id: str | None = None
+    gross_per_share: Decimal | None = None
+    fee_per_share: Decimal | None = None
+    fee_currency: str | None = None
+    fx_rate_to_reporting: Decimal | None = None
+    cost_basis_reporting_per_share: Decimal | None = None
 
 
 def _as_date(value: date | datetime | str | None) -> date:
@@ -238,6 +281,146 @@ def _warning_text(warnings: list[str]) -> str | None:
     """Return stable, de-duplicated warning text."""
     unique = list(dict.fromkeys(warnings))
     return "; ".join(unique) if unique else None
+
+
+def _decimal(value: Any) -> Decimal | None:
+    """Convert present numeric CSV values to Decimal without float arithmetic."""
+    if value is None:
+        return None
+    return Decimal(str(value))
+
+
+def _to_float(value: Decimal | None) -> float | None:
+    """Return a float for DataFrame/reporting boundaries."""
+    if value is None:
+        return None
+    return float(value)
+
+
+def _fee_components(row: dict[str, Any]) -> list[tuple[Decimal, str | None]]:
+    """Return fees that affect trade economics and broker cash balances."""
+    fees: list[tuple[Decimal, str | None]] = []
+    for fee_column, fee_currency_column in (
+        ("stamp_duty_reserve_tax", "stamp_duty_reserve_tax_currency"),
+        ("currency_conversion_fee", "currency_conversion_fee_currency"),
+    ):
+        fee = _decimal(row.get(fee_column))
+        if fee is None or abs(fee) <= Decimal(str(FLOAT_TOLERANCE)):
+            continue
+        fees.append((abs(fee), row.get(fee_currency_column)))
+    return fees
+
+
+def _trade_gross_amount(
+    row: dict[str, Any],
+) -> tuple[Decimal | None, str | None, list[str]]:
+    """Return gross trade value, preferring instrument currency economics."""
+    shares = _decimal(row.get("shares"))
+    price_per_share = _decimal(row.get("price_per_share"))
+    if shares is not None and price_per_share is not None and row.get("price_currency"):
+        return shares * price_per_share, row.get("price_currency"), []
+
+    total = _decimal(row.get("total"))
+    if total is not None:
+        return abs(total), row.get("total_currency"), []
+
+    return None, None, ["missing monetary value"]
+
+
+def _cash_currency(row: dict[str, Any], fallback_currency: str | None) -> str | None:
+    """Return the broker cash currency affected by a trade."""
+    return row.get("total_currency") or fallback_currency
+
+
+def _cash_amount(row: dict[str, Any], gross: Decimal | None) -> Decimal | None:
+    """Return the gross cash movement before separate fee cash movements."""
+    total = _decimal(row.get("total"))
+    if total is not None:
+        return abs(total)
+    return gross
+
+
+def _fx_rate_to_reporting(
+    row: dict[str, Any],
+    amount_currency: str | None,
+    reporting_currency: str,
+    warnings: list[str],
+    *,
+    transaction_label: str,
+) -> Decimal | None:
+    """Return the row FX rate needed to convert an amount to reporting currency."""
+    if amount_currency is None:
+        warnings.append(f"{transaction_label}: missing currency")
+        return None
+    if amount_currency == reporting_currency:
+        return Decimal("1")
+
+    rate = _decimal(row.get("exchange_rate"))
+    if rate is None or rate <= 0:
+        warnings.append(
+            f"{transaction_label}: missing FX rate from {amount_currency} to "
+            f"{reporting_currency}"
+        )
+        return None
+    return rate
+
+
+def _convert_amount(
+    amount: Decimal | None,
+    amount_currency: str | None,
+    reporting_currency: str,
+    row: dict[str, Any],
+    warnings: list[str],
+    *,
+    transaction_label: str,
+) -> tuple[Decimal | None, Decimal | None]:
+    """Convert an amount using the transaction's own FX rate where required."""
+    if amount is None:
+        return None, None
+    rate = _fx_rate_to_reporting(
+        row,
+        amount_currency,
+        reporting_currency,
+        warnings,
+        transaction_label=transaction_label,
+    )
+    if rate is None:
+        return None, None
+    return amount * rate, rate
+
+
+def _fees_total_for_currency(
+    fees: list[tuple[Decimal, str | None]], currency: str | None
+) -> Decimal:
+    """Return fees denominated in one original currency."""
+    return sum(
+        (fee for fee, fee_currency in fees if fee_currency == currency), Decimal()
+    )
+
+
+def _fees_reporting_total(
+    fees: list[tuple[Decimal, str | None]],
+    reporting_currency: str,
+    row: dict[str, Any],
+    warnings: list[str],
+    *,
+    transaction_label: str,
+) -> Decimal | None:
+    """Convert every known fee to reporting currency, preserving unknowns."""
+    total = Decimal()
+    for fee, fee_currency in fees:
+        converted, _ = _convert_amount(
+            fee,
+            fee_currency,
+            reporting_currency,
+            row,
+            warnings,
+            transaction_label=transaction_label,
+        )
+        if converted is None:
+            return None
+        total += converted
+    return total
 
 
 def build_open_lots(transactions: pl.DataFrame) -> list[Lot]:
@@ -405,10 +588,12 @@ def disposal_matches_frame(
     transactions: pl.DataFrame,
     *,
     threshold_months: int = 6,
+    reporting_currency: str = "EUR",
 ) -> pl.DataFrame:
     """Return one row per FIFO acquisition-lot match for every recognized sell."""
     if threshold_months < 0:
         raise ValueError("Holding-period threshold must be zero months or greater")
+    reporting_currency = reporting_currency.upper()
 
     required_columns = {"action", "time", "shares", "ticker", "isin"}
     missing_columns = required_columns - set(transactions.columns)
@@ -432,9 +617,20 @@ def disposal_matches_frame(
 
         asset_key = _asset_key(row)
         shares = float(row["shares"])
-        amount, currency, amount_warnings = _trade_amount(
-            row, is_buy=row["action"] in BUY_ACTIONS
-        )
+        decimal_shares = Decimal(str(shares))
+        gross, currency, amount_warnings = _trade_gross_amount(row)
+        fees = _fee_components(row)
+        same_currency_fee = _fees_total_for_currency(fees, currency)
+        legacy_amount = None if gross is None else gross
+        if legacy_amount is not None:
+            legacy_amount = (
+                legacy_amount + same_currency_fee
+                if row["action"] in BUY_ACTIONS
+                else legacy_amount - same_currency_fee
+            )
+        excluded_fees = any(fee_currency != currency for _, fee_currency in fees)
+        if excluded_fees:
+            amount_warnings.append("fees in another currency excluded")
         duplicate_key = (
             row.get("action"),
             row.get("time"),
@@ -449,6 +645,27 @@ def disposal_matches_frame(
             amount_warnings.append("overlap duplicate transaction removed")
 
         if row["action"] in BUY_ACTIONS:
+            buy_reporting_warnings = [*amount_warnings]
+            gross_reporting, buy_fx_rate = _convert_amount(
+                gross,
+                currency,
+                reporting_currency,
+                row,
+                buy_reporting_warnings,
+                transaction_label="buy",
+            )
+            fees_reporting = _fees_reporting_total(
+                fees,
+                reporting_currency,
+                row,
+                buy_reporting_warnings,
+                transaction_label="buy fee",
+            )
+            cost_basis_reporting = (
+                None
+                if gross_reporting is None or fees_reporting is None
+                else gross_reporting + fees_reporting
+            )
             open_lots.append(
                 DisposalLot(
                     asset_key=asset_key,
@@ -457,9 +674,23 @@ def disposal_matches_frame(
                     isin=row.get("isin"),
                     buy_time=row["time"],
                     remaining_shares=shares,
-                    amount_per_share=None if amount is None else amount / shares,
+                    amount_per_share=(
+                        None
+                        if legacy_amount is None
+                        else float(legacy_amount / decimal_shares)
+                    ),
                     currency=currency,
-                    warning=_warning_text(amount_warnings),
+                    warning=_warning_text(buy_reporting_warnings),
+                    transaction_id=row.get("id"),
+                    gross_per_share=(None if gross is None else gross / decimal_shares),
+                    fee_per_share=same_currency_fee / decimal_shares,
+                    fee_currency=currency,
+                    fx_rate_to_reporting=buy_fx_rate,
+                    cost_basis_reporting_per_share=(
+                        None
+                        if cost_basis_reporting is None
+                        else cost_basis_reporting / decimal_shares
+                    ),
                 )
             )
             continue
@@ -467,13 +698,48 @@ def disposal_matches_frame(
         sell_number += 1
         disposal_id = str(row.get("id") or f"sell-{sell_number:06d}")
         shares_to_sell = shares
-        proceeds_per_share = None if amount is None else amount / shares
+        proceeds_per_share = (
+            None if legacy_amount is None else legacy_amount / decimal_shares
+        )
+        gross_per_share = None if gross is None else gross / decimal_shares
+        fees_reporting_total = _fees_reporting_total(
+            fees,
+            reporting_currency,
+            row,
+            amount_warnings,
+            transaction_label="sell fee",
+        )
+        fees_reporting_per_share = (
+            None
+            if fees_reporting_total is None
+            else fees_reporting_total / decimal_shares
+        )
+        gross_reporting, sell_fx_rate = _convert_amount(
+            gross,
+            currency,
+            reporting_currency,
+            row,
+            amount_warnings,
+            transaction_label="sell",
+        )
+        gross_reporting_per_share = (
+            None if gross_reporting is None else gross_reporting / decimal_shares
+        )
+        net_reporting_per_share = (
+            None
+            if gross_reporting_per_share is None or fees_reporting_per_share is None
+            else gross_reporting_per_share - fees_reporting_per_share
+        )
+        cash_currency = _cash_currency(row, currency)
+        cash_amount = _cash_amount(row, gross)
+        cash_per_share = None if cash_amount is None else cash_amount / decimal_shares
 
         for lot in open_lots:
             if lot.asset_key != asset_key or shares_to_sell <= FLOAT_TOLERANCE:
                 continue
 
             matched_shares = min(lot.remaining_shares, shares_to_sell)
+            decimal_matched_shares = Decimal(str(matched_shares))
             lot.remaining_shares -= matched_shares
             shares_to_sell -= matched_shares
             holding_days = (row["time"].date() - lot.buy_time.date()).days
@@ -484,7 +750,7 @@ def disposal_matches_frame(
             sell_proceeds = (
                 None
                 if proceeds_per_share is None
-                else proceeds_per_share * matched_shares
+                else proceeds_per_share * decimal_matched_shares
             )
             cost_basis = (
                 None
@@ -500,26 +766,112 @@ def disposal_matches_frame(
                 realized_gain_loss = None
                 warnings.append("missing currency")
             elif sell_proceeds is not None and cost_basis is not None:
-                realized_gain_loss = sell_proceeds - cost_basis
+                realized_gain_loss = float(sell_proceeds) - cost_basis
             else:
                 realized_gain_loss = None
                 warnings.append("missing cost basis or proceeds")
+            buy_gross = (
+                None
+                if lot.gross_per_share is None
+                else lot.gross_per_share * decimal_matched_shares
+            )
+            buy_fee = (
+                None
+                if lot.fee_per_share is None
+                else lot.fee_per_share * decimal_matched_shares
+            )
+            cost_basis_reporting = (
+                None
+                if lot.cost_basis_reporting_per_share is None
+                else lot.cost_basis_reporting_per_share * decimal_matched_shares
+            )
+            sell_gross = (
+                None
+                if gross_per_share is None
+                else gross_per_share * decimal_matched_shares
+            )
+            sell_fee = _fees_total_for_currency(fees, currency) * (
+                decimal_matched_shares / decimal_shares
+            )
+            gross_proceeds_reporting = (
+                None
+                if gross_reporting_per_share is None
+                else gross_reporting_per_share * decimal_matched_shares
+            )
+            sell_fees_reporting = (
+                None
+                if fees_reporting_per_share is None
+                else fees_reporting_per_share * decimal_matched_shares
+            )
+            net_proceeds_reporting = (
+                None
+                if net_reporting_per_share is None
+                else net_reporting_per_share * decimal_matched_shares
+            )
+            realized_gain_loss_reporting = (
+                None
+                if cost_basis_reporting is None or net_proceeds_reporting is None
+                else net_proceeds_reporting - cost_basis_reporting
+            )
+            original_gain_loss = (
+                None
+                if sell_proceeds is None or cost_basis is None
+                else Decimal(str(sell_proceeds)) - Decimal(str(cost_basis))
+            )
+            cash_impact = (
+                None
+                if cash_per_share is None
+                else cash_per_share * decimal_matched_shares
+            )
+            fee_cash_impact = (
+                None
+                if same_currency_fee == 0
+                else -same_currency_fee * (decimal_matched_shares / decimal_shares)
+            )
 
             result_rows.append(
                 {
                     "disposal_id": disposal_id,
+                    "buy_transaction_id": lot.transaction_id,
+                    "sell_transaction_id": row.get("id"),
                     "ticker": row.get("ticker") or lot.ticker,
                     "name": row.get("name") or lot.name,
                     "isin": row.get("isin") or lot.isin,
                     "sell_time": row["time"],
                     "sell_date": row["time"].date(),
                     "sold_shares": shares,
-                    "sell_proceeds": sell_proceeds,
+                    "sell_proceeds": _to_float(sell_proceeds),
                     "currency": currency,
                     "buy_date": lot.buy_time.date(),
                     "matched_shares": matched_shares,
                     "cost_basis": cost_basis,
                     "realized_gain_loss": realized_gain_loss,
+                    "reporting_currency": reporting_currency,
+                    "buy_gross": _to_float(buy_gross),
+                    "buy_currency": lot.currency,
+                    "buy_fee": _to_float(buy_fee),
+                    "buy_fee_currency": lot.fee_currency,
+                    "buy_fx_rate": _to_float(lot.fx_rate_to_reporting),
+                    "cost_basis_reporting": _to_float(cost_basis_reporting),
+                    "sell_gross": _to_float(sell_gross),
+                    "sell_currency": currency,
+                    "sell_fee": _to_float(sell_fee),
+                    "sell_fee_currency": currency,
+                    "sell_fx_rate": _to_float(sell_fx_rate),
+                    "gross_proceeds_reporting": _to_float(gross_proceeds_reporting),
+                    "sell_fees_reporting": _to_float(sell_fees_reporting),
+                    "net_proceeds_reporting": _to_float(net_proceeds_reporting),
+                    "realized_gain_loss_reporting": _to_float(
+                        realized_gain_loss_reporting
+                    ),
+                    "original_gain_loss": _to_float(original_gain_loss),
+                    "original_gain_loss_currency": (
+                        currency if lot.currency == currency else None
+                    ),
+                    "cash_currency": cash_currency,
+                    "cash_impact": _to_float(cash_impact),
+                    "fee_cash_currency": currency if same_currency_fee else None,
+                    "fee_cash_impact": _to_float(fee_cash_impact),
                     "holding_days": holding_days,
                     "threshold_months": threshold_months,
                     "above_threshold": lot.buy_time.date()
@@ -537,6 +889,8 @@ def disposal_matches_frame(
             result_rows.append(
                 {
                     "disposal_id": disposal_id,
+                    "buy_transaction_id": None,
+                    "sell_transaction_id": row.get("id"),
                     "ticker": row.get("ticker"),
                     "name": row.get("name"),
                     "isin": row.get("isin"),
@@ -546,13 +900,69 @@ def disposal_matches_frame(
                     "sell_proceeds": (
                         None
                         if proceeds_per_share is None
-                        else proceeds_per_share * shares_to_sell
+                        else _to_float(
+                            proceeds_per_share * Decimal(str(shares_to_sell))
+                        )
                     ),
                     "currency": currency,
                     "buy_date": None,
                     "matched_shares": shares_to_sell,
                     "cost_basis": None,
                     "realized_gain_loss": None,
+                    "reporting_currency": reporting_currency,
+                    "buy_gross": None,
+                    "buy_currency": None,
+                    "buy_fee": None,
+                    "buy_fee_currency": None,
+                    "buy_fx_rate": None,
+                    "cost_basis_reporting": None,
+                    "sell_gross": (
+                        None
+                        if gross_per_share is None
+                        else _to_float(gross_per_share * Decimal(str(shares_to_sell)))
+                    ),
+                    "sell_currency": currency,
+                    "sell_fee": _to_float(
+                        same_currency_fee
+                        * (Decimal(str(shares_to_sell)) / decimal_shares)
+                    ),
+                    "sell_fee_currency": currency,
+                    "sell_fx_rate": _to_float(sell_fx_rate),
+                    "gross_proceeds_reporting": (
+                        None
+                        if gross_reporting_per_share is None
+                        else _to_float(
+                            gross_reporting_per_share * Decimal(str(shares_to_sell))
+                        )
+                    ),
+                    "sell_fees_reporting": (
+                        None
+                        if fees_reporting_per_share is None
+                        else _to_float(
+                            fees_reporting_per_share * Decimal(str(shares_to_sell))
+                        )
+                    ),
+                    "net_proceeds_reporting": (
+                        None
+                        if net_reporting_per_share is None
+                        else _to_float(
+                            net_reporting_per_share * Decimal(str(shares_to_sell))
+                        )
+                    ),
+                    "realized_gain_loss_reporting": None,
+                    "original_gain_loss": None,
+                    "original_gain_loss_currency": None,
+                    "cash_currency": cash_currency,
+                    "cash_impact": (
+                        None
+                        if cash_per_share is None
+                        else _to_float(cash_per_share * Decimal(str(shares_to_sell)))
+                    ),
+                    "fee_cash_currency": currency if same_currency_fee else None,
+                    "fee_cash_impact": _to_float(
+                        -same_currency_fee
+                        * (Decimal(str(shares_to_sell)) / decimal_shares)
+                    ),
                     "holding_days": None,
                     "threshold_months": threshold_months,
                     "above_threshold": None,
@@ -579,11 +989,16 @@ def disposal_summary_frame(matches: pl.DataFrame) -> pl.DataFrame:
         return pl.DataFrame(schema=DISPOSAL_SUMMARY_SCHEMA)
 
     rows = list(matches.iter_rows(named=True))
-    groups: dict[tuple[str | None, str | None], list[dict[str, Any]]] = {}
-    currency_groups: dict[str | None, list[dict[str, Any]]] = {}
+    groups: dict[tuple[str | None, str | None, str | None], list[dict[str, Any]]] = {}
+    currency_groups: dict[tuple[str | None, str | None], list[dict[str, Any]]] = {}
     for row in rows:
-        groups.setdefault((row["ticker"], row["currency"]), []).append(row)
-        currency_groups.setdefault(row["currency"], []).append(row)
+        reporting_currency = row.get("reporting_currency")
+        groups.setdefault(
+            (row["ticker"], row["currency"], reporting_currency), []
+        ).append(row)
+        currency_groups.setdefault((row["currency"], reporting_currency), []).append(
+            row
+        )
 
     summary_rows: list[dict[str, Any]] = []
     for scope, grouped_rows in [
@@ -606,22 +1021,74 @@ def disposal_summary_frame(matches: pl.DataFrame) -> pl.DataFrame:
             if row["holding_days"] is not None
         ]
         currency = grouped_rows[0]["currency"]
+        reporting_currency = grouped_rows[0]["reporting_currency"]
+        warnings = [str(row["warning"]) for row in grouped_rows if row["warning"]]
 
         summary_rows.append(
             {
                 "scope": scope,
                 "ticker": grouped_rows[0]["ticker"] if scope == "ticker" else "ALL",
                 "currency": currency,
+                "reporting_currency": reporting_currency,
                 "total_proceeds": _complete_sum(grouped_rows, "sell_proceeds"),
                 "total_cost_basis": _complete_sum(grouped_rows, "cost_basis"),
                 "total_realized_gain_loss": _complete_sum(
                     grouped_rows, "realized_gain_loss"
                 ),
+                "total_gross_proceeds_reporting": _complete_sum(
+                    grouped_rows, "gross_proceeds_reporting"
+                ),
+                "total_fees_reporting": _complete_sum(
+                    grouped_rows, "sell_fees_reporting"
+                ),
+                "total_net_proceeds_reporting": _complete_sum(
+                    grouped_rows, "net_proceeds_reporting"
+                ),
+                "total_cost_basis_reporting": _complete_sum(
+                    grouped_rows, "cost_basis_reporting"
+                ),
+                "total_realized_gain_loss_reporting": _complete_sum(
+                    grouped_rows, "realized_gain_loss_reporting"
+                ),
                 "disposals": len({row["disposal_id"] for row in grouped_rows}),
+                "matched_lots": len(grouped_rows),
                 "shortest_holding_days": min(holding_days) if holding_days else None,
                 "longest_holding_days": max(holding_days) if holding_days else None,
-                "warning": None,
+                "warning": _warning_text(warnings),
             }
         )
 
     return pl.DataFrame(summary_rows, schema=DISPOSAL_SUMMARY_SCHEMA)
+
+
+def cash_movements_frame(matches: pl.DataFrame) -> pl.DataFrame:
+    """Aggregate broker cash movements by currency for disposal reporting."""
+    if matches.is_empty():
+        return pl.DataFrame(schema=CASH_MOVEMENTS_SCHEMA)
+
+    movements: dict[str, Decimal] = {}
+    for row in matches.iter_rows(named=True):
+        cash_currency = row.get("cash_currency")
+        cash_impact = _decimal(row.get("cash_impact"))
+        if cash_currency is not None and cash_impact is not None:
+            movements[str(cash_currency)] = (
+                movements.get(str(cash_currency), Decimal()) + cash_impact
+            )
+
+        fee_currency = row.get("fee_cash_currency")
+        fee_impact = _decimal(row.get("fee_cash_impact"))
+        if fee_currency is not None and fee_impact is not None:
+            movements[str(fee_currency)] = (
+                movements.get(str(fee_currency), Decimal()) + fee_impact
+            )
+
+    if not movements:
+        return pl.DataFrame(schema=CASH_MOVEMENTS_SCHEMA)
+
+    return pl.DataFrame(
+        [
+            {"currency": currency, "cash_impact": float(amount)}
+            for currency, amount in sorted(movements.items())
+        ],
+        schema=CASH_MOVEMENTS_SCHEMA,
+    )

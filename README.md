@@ -23,7 +23,8 @@ The tool currently:
   FIFO: the oldest available buy lot is consumed first.
 - Shows the remaining buy lots behind each position.
 - Reports recognized share disposals, their matched FIFO acquisition lots,
-  holding periods, realized gains/losses, and aggregate totals.
+  holding periods, realized gains/losses, reporting-currency totals, and
+  aggregate cash movements by currency.
 - Reports shares bought on or before the date six calendar months before a
   chosen `as-of` date.
 - Uses ISIN to identify an asset when available, falling back to ticker.
@@ -181,19 +182,57 @@ Use a different calendar-month holding threshold or filter to one ticker:
 uv run t212-tax-lots disposals data/ --threshold-months 12 --ticker AAPL
 ```
 
+Realized gain/loss totals are authoritative in the reporting currency, which
+defaults to EUR. Use another reporting currency when needed:
+
+```bash
+uv run t212-tax-lots disposals data/ --reporting-currency USD
+```
+
 The detail table shows sell proceeds, matched buy dates and quantities, cost
-basis, realized gain/loss, holding days, and whether each matched lot is above
-or below the threshold. Summary tables are split by calculation currency and
-include totals by ticker plus an overall total for that currency.
+basis, net proceeds, realized gain/loss, original-currency reference values,
+holding days, and whether each matched lot is above or below the threshold.
+Summary tables are split by original trade currency for auditability, but their
+gain/loss totals are converted to the reporting currency before aggregation.
+The command also prints an authoritative realized result table and a separate
+cash movement summary by currency.
 
 The report prefers quantity multiplied by `Price / share` in the instrument's
 `Currency (Price / share)`. This keeps a buy and sell comparable when a Trading
 212 multi-currency account settles them in different cash currencies. It falls
-back to `Total` and `Currency (Total)` when price information is unavailable.
-Exported currency-conversion fees and stamp duty are included only when their
-currency matches the calculation currency. Missing values, unmatched sells,
-possible duplicate transactions, and incompatible currencies are reported as
+back to `Total` and `Currency (Total)` when price information is unavailable for
+the original-currency reference calculation.
+
+The reporting-currency calculation uses the transaction row's `Exchange rate`
+when the trade or fee currency differs from the configured reporting currency.
+Buy-side fees are included in cost basis. Sell-side fees reduce proceeds. If a
+fee is in another currency, it is converted with the transaction's available FX
+data. Missing values, missing FX rates, unmatched sells, possible duplicate
+transactions, and incompatible original-currency comparisons are reported as
 warnings; unknown values are not silently included in monetary totals.
+
+Stock sales do not imply a currency conversion. Selling a USD security increases
+USD cash in the cash movement summary unless the export contains a separate
+explicit currency-conversion transaction. Currency-conversion rows are currently
+reported as unsupported actions rather than inferred from stock trades.
+
+Example:
+
+```text
+Buy:  100 USD stock when 1 USD = 0.90 EUR
+Sell: 110 USD stock when 1 USD = 0.80 EUR
+Sale proceeds remain as USD cash in Trading 212.
+
+Original-currency result: +10 USD
+EUR cost basis: 100 x 0.90 = 90 EUR
+EUR proceeds: 110 x 0.80 = 88 EUR
+Authoritative EUR realized result: -2 EUR
+Cash movement: USD cash increases by 110 USD, minus any sell-side fees.
+```
+
+This is why a reporting-currency gain/loss can differ from the
+original-currency trade result even when the broker cash remains in the sale
+currency.
 
 Use command-specific help for all options:
 
@@ -224,11 +263,12 @@ an ISIN is missing, ticker is used instead.
 - The tool assumes FIFO lot matching. This may not match the rules or elections
   relevant to your jurisdiction.
 - The disposal report calculates realized gains/losses from the monetary values
-  present in the export. It does not calculate taxes or convert amounts between
-  currencies. When it uses the instrument currency, gains/losses do not include
-  exchange-rate changes against another reporting currency.
+  and transaction-level exchange rates present in the export. It does not fetch
+  external FX rates.
 - It does not account for unrecognized trade action names, transfers, corporate
   actions, stock splits, mergers, or other events that may affect holdings.
+- Explicit currency-conversion rows are not yet modeled as cash transfers; they
+  are reported as unsupported actions.
 - Duplicate detection prefers Trading 212 transaction IDs. For rows without an
   ID, exact matching transaction details are deduplicated only across different
   files; review the import notice when combining exports.
@@ -237,7 +277,9 @@ an ISIN is missing, ticker is used instead.
   reported sell timestamp.
 - It relies on the contents and column format of the supplied Trading 212
   exports.
-- Share quantities and prices currently use floating-point numbers.
+- Internal realized gain/loss calculations use decimal arithmetic where amounts
+  are converted or allocated. DataFrame outputs are numeric reporting values and
+  are rounded only by CLI display formatting.
 - The eligibility report only measures lot age. It does not determine whether a
   sale is legally or tax-wise eligible.
 
@@ -248,7 +290,6 @@ Always inspect the inputs and validate important results independently.
 Potential improvements include:
 
 - Supporting transfers, stock splits, and additional Trading 212 trade actions.
-- Calculating realized gains and losses with fees and currency conversion.
 - Using decimal arithmetic where exact monetary precision is required.
 - Exporting calculated positions and lots to CSV or another structured format.
 - Adding configurable lot-matching methods and jurisdiction-specific reports.
